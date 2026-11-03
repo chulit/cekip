@@ -39,6 +39,23 @@ cekip scan 192.168.1.0/24 --format csv
 Opsi: `--timeout-ms` (default 800), `--concurrency` (default 64).
 Batas keamanan: maksimal 65.536 host per scan.
 
+## Mode sopan (`--sopan`)
+
+Buat dipakai di jaringan yang bukan milik sendiri (kantor/kampus) —
+dengan izin admin jaringannya tentunya:
+
+```bash
+cekip scan 192.168.1.0/24 --sopan
+cekip free-url 192.168.1.0/24 --interface en6 --sopan
+```
+
+Mode ini membuat scan **pelan dan halus**: konkurensi dipotong ke maks 8,
+ada jeda 250 ms antar-batch, dan probe TCP cuma memakai port 80/443
+(bukan 7 port). Catatan penting: ini **bukan mode siluman** — aktivitas
+tetap tercatat di log jaringan; bedanya hanya tidak berisik dan tidak
+memicu alert berbasis laju. Yang membuat sebuah pemindaian sah atau
+tidak adalah izin dari pemilik jaringan, bukan kecepatan scan-nya.
+
 ## Cari IP kosong yang bisa akses URL tertentu
 
 IP kosong tidak punya device, jadi pertanyaan "apakah IP X bisa buka
@@ -85,7 +102,7 @@ pakai RST — bukan jaminan port itu terbuka).
 
 ```bash
 cargo build --release   # binary di target/release/cekip
-cargo test              # 14 unit test: parsing CIDR/range, exclude, ARP, keputusan status, alias & cek URL
+cargo test              # 15 unit test: parsing CIDR/range, exclude, ARP, keputusan status, alias, cek URL & mode sopan
 ```
 
 Tidak butuh hak root: ping memakai binary `ping` bawaan OS, ARP dibaca dari

@@ -1,4 +1,4 @@
-use cekip::{check_url, collect_urls, scan, url_host, with_alias, Excludes, HostResult, Status, Target};
+use cekip::{check_url, collect_urls, scan, tuning, url_host, with_alias, Excludes, HostResult, Status, Target};
 use clap::{Parser, Subcommand, ValueEnum};
 use std::net::Ipv4Addr;
 use std::process::ExitCode;
@@ -81,6 +81,11 @@ struct Opts {
     /// Jumlah ping paralel
     #[arg(long, default_value_t = 64)]
     concurrency: usize,
+    /// Mode sopan: scan pelan & halus (maks 8 paralel, jeda antar-batch,
+    /// probe TCP cuma port 80/443). Bukan mode siluman — aktivitas tetap
+    /// tercatat di log jaringan, hanya tidak berisik.
+    #[arg(long)]
+    sopan: bool,
     /// IP/range yang dikecualikan (dipisah koma), mis. "192.168.1.1,192.168.1.100-192.168.1.200"
     #[arg(long, default_value = "")]
     exclude: String,
@@ -114,7 +119,7 @@ fn run(cli: Cli) -> Result<(), String> {
                 &[ip],
                 &Excludes::default(),
                 Duration::from_millis(timeout_ms),
-                1,
+                tuning(false, 1),
             );
             print_results(&results, &Format::Table);
             Ok(())
@@ -182,8 +187,13 @@ fn free_url(
     };
     let hosts = parsed.hosts()?;
     let excludes = Excludes::parse(&opts.exclude)?;
-    eprintln!("Scanning {} host untuk kandidat kosong...", hosts.len());
-    let results = scan(&hosts, &excludes, Duration::from_millis(opts.timeout_ms), opts.concurrency);
+    let tune = tuning(opts.sopan, opts.concurrency);
+    eprintln!(
+        "Scanning {} host untuk kandidat kosong{}...",
+        hosts.len(),
+        if opts.sopan { " (mode sopan: pelan & halus)" } else { "" }
+    );
+    let results = scan(&hosts, &excludes, Duration::from_millis(opts.timeout_ms), tune);
     let candidates: Vec<Ipv4Addr> = results
         .iter()
         .filter(|r| r.status == Status::FreeCandidate && !r.excluded)
@@ -278,8 +288,15 @@ fn confirm(prompt: &str) -> bool {
 fn scan_target(target: &str, opts: &Opts) -> Result<Vec<HostResult>, String> {
     let hosts = Target::parse(target)?.hosts()?;
     let excludes = Excludes::parse(&opts.exclude)?;
-    eprintln!("Scanning {} host (timeout {} ms, {} paralel)...", hosts.len(), opts.timeout_ms, opts.concurrency);
-    Ok(scan(&hosts, &excludes, Duration::from_millis(opts.timeout_ms), opts.concurrency))
+    let tune = tuning(opts.sopan, opts.concurrency);
+    eprintln!(
+        "Scanning {} host (timeout {} ms, {} paralel{})...",
+        hosts.len(),
+        opts.timeout_ms,
+        tune.concurrency,
+        if opts.sopan { ", mode sopan" } else { "" }
+    );
+    Ok(scan(&hosts, &excludes, Duration::from_millis(opts.timeout_ms), tune))
 }
 
 fn print_summary(results: &[HostResult]) {

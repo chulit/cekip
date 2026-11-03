@@ -219,11 +219,39 @@ pub fn decide_status(ping_ok: bool, in_arp: bool, tcp_alive: bool) -> Status {
 /// IP kosong adalah timeout / tidak ada rute.
 const TCP_PROBE_PORTS: [u16; 7] = [80, 443, 22, 53, 445, 3389, 8080];
 
+/// Subset halus untuk mode sopan: cukup 2 port web yang paling umum.
+const TCP_PROBE_PORTS_QUIET: [u16; 2] = [80, 443];
+
+// ------------------------------------------------------------ mode sopan ---
+
+/// Pengaturan laju scan. Mode sopan BUKAN mode siluman — aktivitas tetap
+/// terlihat di log jaringan; bedanya cuma lebih pelan & lebih sedikit
+/// probe, jadi tidak berisik dan tidak memicu alert berbasis laju.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScanTuning {
+    pub concurrency: usize,
+    pub batch_delay: Duration,
+    pub quiet_tcp: bool,
+}
+
+/// Resolusi tuning yang dipakai dari pilihan user (murni, bisa ditest).
+pub fn tuning(sopan: bool, concurrency: usize) -> ScanTuning {
+    if sopan {
+        ScanTuning {
+            concurrency: concurrency.min(8).max(1),
+            batch_delay: Duration::from_millis(250),
+            quiet_tcp: true,
+        }
+    } else {
+        ScanTuning { concurrency: concurrency.max(1), batch_delay: Duration::ZERO, quiet_tcp: false }
+    }
+}
+
 /// Probe TCP: mengembalikan port pertama yang membuktikan host hidup.
 /// Dipakai bila ping gagal (banyak device & sandbox memblokir ICMP).
-pub fn tcp_probe(ip: Ipv4Addr, timeout: Duration) -> Option<u16> {
+pub fn tcp_probe(ip: Ipv4Addr, timeout: Duration, ports: &[u16]) -> Option<u16> {
     use std::net::{SocketAddr, TcpStream};
-    for port in TCP_PROBE_PORTS {
+    for &port in ports {
         let addr = SocketAddr::from((ip, port));
         match TcpStream::connect_timeout(&addr, timeout) {
             Ok(_) => return Some(port),
@@ -262,13 +290,17 @@ pub fn scan(
     hosts: &[Ipv4Addr],
     excludes: &Excludes,
     timeout: Duration,
-    concurrency: usize,
+    tuning: ScanTuning,
 ) -> Vec<HostResult> {
-    let concurrency = concurrency.max(1);
+    let concurrency = tuning.concurrency.max(1);
+    let probe_ports: &[u16] = if tuning.quiet_tcp { &TCP_PROBE_PORTS_QUIET } else { &TCP_PROBE_PORTS };
     // (latency ping, port TCP bukti hidup)
     let mut probe_results: HashMap<Ipv4Addr, (Option<Duration>, Option<u16>)> = HashMap::new();
 
-    for chunk in hosts.chunks(concurrency) {
+    for (idx, chunk) in hosts.chunks(concurrency).enumerate() {
+        if idx > 0 && !tuning.batch_delay.is_zero() {
+            std::thread::sleep(tuning.batch_delay);
+        }
         let probed: Vec<(Ipv4Addr, Option<Duration>, Option<u16>)> = std::thread::scope(|scope| {
             let handles: Vec<_> = chunk
                 .iter()
@@ -278,7 +310,7 @@ pub fn scan(
                         // Ping gagal bukan vonis: coba bukti TCP (timeout
                         // dipangkas supaya host kosong tidak lama ditunggu).
                         let tcp = if latency.is_none() {
-                            tcp_probe(ip, Duration::from_millis(250))
+                            tcp_probe(ip, Duration::from_millis(250), probe_ports)
                         } else {
                             None
                         };
@@ -555,6 +587,23 @@ mod tests {
         let map = parse_proc_net_arp(content);
         assert_eq!(map.len(), 1);
         assert!(map.contains_key(&ip("192.168.1.1")));
+    }
+
+    #[test]
+    fn sopan_tuning_resolution() {
+        let normal = tuning(false, 64);
+        assert_eq!(normal.concurrency, 64);
+        assert!(normal.batch_delay.is_zero());
+        assert!(!normal.quiet_tcp);
+
+        let sopan = tuning(true, 64);
+        assert_eq!(sopan.concurrency, 8);
+        assert_eq!(sopan.batch_delay, Duration::from_millis(250));
+        assert!(sopan.quiet_tcp);
+
+        // Konkurensi kecil yang diminta user tidak dinaikkan paksa.
+        assert_eq!(tuning(true, 4).concurrency, 4);
+        assert_eq!(TCP_PROBE_PORTS_QUIET.len(), 2);
     }
 
     #[test]
