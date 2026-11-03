@@ -39,6 +39,29 @@ cekip scan 192.168.1.0/24 --format csv
 Opsi: `--timeout-ms` (default 800), `--concurrency` (default 64).
 Batas keamanan: maksimal 65.536 host per scan.
 
+## Cari IP kosong yang bisa akses URL tertentu
+
+IP kosong tidak punya device, jadi pertanyaan "apakah IP X bisa buka
+YouTube?" hanya bisa dijawab dengan **memakai IP itu sebentar dari mesin
+kamu**: cekip memasang IP kandidat sebagai alias sementara di interface,
+mengirim request ke URL dengan IP sumber = alias itu, lalu melepas
+alias-nya lagi. Hasilnya = aturan firewall/proxy jaringanmu untuk IP
+sumber tersebut.
+
+```bash
+# cari maks 5 IP kosong yang bisa buka YouTube, diuji lewat Ethernet (en6)
+cekip free-url 192.168.1.0/24 --interface en6
+
+# URL lain / interface Wi-Fi / tanpa konfirmasi
+cekip free-url 192.168.1.0/24 --interface en0 --url https://contoh.com --yes
+```
+
+- Butuh `sudo` (sekali di awal) karena memasang alias IP butuh hak admin.
+- `--count` = berhenti setelah menemukan sekian IP yang lolos;
+  `--test-limit` = maksimal kandidat yang diuji satu per satu (default 20).
+- Alias selalu dilepas setelah tiap pengujian, termasuk bila pengujian gagal.
+- Lolos = URL membalas HTTP 2xx/3xx dari IP sumber itu.
+
 Contoh output:
 
 ```
@@ -55,7 +78,7 @@ pakai RST — bukan jaminan port itu terbuka).
 
 ```bash
 cargo build --release   # binary di target/release/cekip
-cargo test              # 10 unit test: parsing CIDR/range, exclude, ARP, keputusan status
+cargo test              # 13 unit test: parsing CIDR/range, exclude, ARP, keputusan status, alias & cek URL
 ```
 
 Tidak butuh hak root: ping memakai binary `ping` bawaan OS, ARP dibaca dari

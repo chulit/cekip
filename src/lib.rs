@@ -315,6 +315,132 @@ pub fn scan(
     results
 }
 
+// ------------------------------------------------------- cek akses URL ---
+//
+// IP yang kosong tidak punya device, jadi "apakah IP X bisa akses YouTube"
+// hanya bisa dijawab dengan *memakai* IP itu sebentar dari mesin ini:
+// pasang alias IP di interface, kirim request dengan IP sumber = alias
+// (curl --interface), lalu lepas alias-nya. Hasilnya mencerminkan aturan
+// firewall/proxy jaringan untuk IP sumber tersebut.
+
+/// Hasil satu kali cek URL dari sebuah IP sumber.
+#[derive(Debug, Clone, Serialize)]
+pub struct UrlAccess {
+    pub http_status: Option<u16>,
+    /// true bila HTTP 2xx/3xx — halaman benar-benar bisa dibuka.
+    pub accessible: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// "200" -> Some(200); "000" (curl gagal total) & sampah -> None.
+pub fn parse_curl_code(out: &str) -> Option<u16> {
+    match out.trim() {
+        "000" | "" => None,
+        s => s.parse().ok(),
+    }
+}
+
+pub fn is_accessible(code: Option<u16>) -> bool {
+    matches!(code, Some(c) if (200..=399).contains(&c))
+}
+
+/// Cek URL memakai `source` (nama interface atau IP) sebagai alamat sumber,
+/// via curl bawaan sistem (TLS & redirect ditangani curl).
+pub fn check_url(source: &str, url: &str, timeout: Duration) -> UrlAccess {
+    let out = Command::new("curl")
+        .args([
+            "-s",
+            "-L",
+            "--max-redirs",
+            "5",
+            "-o",
+            if cfg!(windows) { "NUL" } else { "/dev/null" },
+            "-w",
+            "%{http_code}",
+            "--interface",
+            source,
+            "--max-time",
+            &timeout.as_secs().max(1).to_string(),
+            url,
+        ])
+        .output();
+    match out {
+        Ok(o) => {
+            let code = parse_curl_code(&String::from_utf8_lossy(&o.stdout));
+            UrlAccess {
+                http_status: code,
+                accessible: is_accessible(code),
+                error: if code.is_none() {
+                    let err = String::from_utf8_lossy(&o.stderr).trim().to_string();
+                    Some(if err.is_empty() { "tidak ada respons".into() } else { err })
+                } else {
+                    None
+                },
+            }
+        }
+        Err(e) => UrlAccess { http_status: None, accessible: false, error: Some(format!("curl tidak bisa dijalankan: {e}")) },
+    }
+}
+
+// ----------------------------------------------------------------- alias ---
+
+pub fn prefix_to_netmask(prefix: u8) -> Ipv4Addr {
+    if prefix == 0 {
+        Ipv4Addr::new(0, 0, 0, 0)
+    } else if prefix >= 32 {
+        Ipv4Addr::new(255, 255, 255, 255)
+    } else {
+        Ipv4Addr::from(u32::MAX << (32 - prefix))
+    }
+}
+
+/// Perintah (via sudo) memasang alias IP di interface.
+pub fn alias_add_command(iface: &str, ip: Ipv4Addr, prefix: u8) -> Vec<String> {
+    #[cfg(target_os = "macos")]
+    {
+        vec!["sudo".into(), "ifconfig".into(), iface.into(), "alias".into(), ip.to_string(), prefix_to_netmask(prefix).to_string()]
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        vec!["sudo".into(), "ip".into(), "addr".into(), "add".into(), format!("{ip}/{prefix}"), "dev".into(), iface.into()]
+    }
+}
+
+/// Perintah (via sudo) melepas alias IP dari interface.
+pub fn alias_remove_command(iface: &str, ip: Ipv4Addr, prefix: u8) -> Vec<String> {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = prefix;
+        vec!["sudo".into(), "ifconfig".into(), iface.into(), "-alias".into(), ip.to_string()]
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        vec!["sudo".into(), "ip".into(), "addr".into(), "del".into(), format!("{ip}/{prefix}"), "dev".into(), iface.into()]
+    }
+}
+
+fn run_command(cmd: &[String]) -> Result<(), String> {
+    let status = Command::new(&cmd[0])
+        .args(&cmd[1..])
+        .status()
+        .map_err(|e| format!("gagal menjalankan {}: {e}", cmd.join(" ")))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("perintah gagal ({}): {}", status, cmd.join(" ")))
+    }
+}
+
+/// Pasang alias IP, jalankan `f`, lalu SELALU lepas alias-nya lagi
+/// (termasuk bila `f` mengembalikan hasil gagal di level aplikasi).
+pub fn with_alias<T>(iface: &str, ip: Ipv4Addr, prefix: u8, f: impl FnOnce() -> T) -> Result<T, String> {
+    run_command(&alias_add_command(iface, ip, prefix))?;
+    let result = f();
+    let removed = run_command(&alias_remove_command(iface, ip, prefix));
+    removed.map(|_| result)
+}
+
 // ----------------------------------------------------------------- tests ---
 
 #[cfg(test)]
@@ -393,6 +519,37 @@ mod tests {
         let map = parse_proc_net_arp(content);
         assert_eq!(map.len(), 1);
         assert!(map.contains_key(&ip("192.168.1.1")));
+    }
+
+    #[test]
+    fn netmask_from_prefix() {
+        assert_eq!(prefix_to_netmask(24), ip("255.255.255.0"));
+        assert_eq!(prefix_to_netmask(16), ip("255.255.0.0"));
+        assert_eq!(prefix_to_netmask(30), ip("255.255.255.252"));
+        assert_eq!(prefix_to_netmask(0), ip("0.0.0.0"));
+        assert_eq!(prefix_to_netmask(32), ip("255.255.255.255"));
+    }
+
+    #[test]
+    fn curl_code_and_accessibility() {
+        assert_eq!(parse_curl_code("200"), Some(200));
+        assert_eq!(parse_curl_code("000"), None);
+        assert_eq!(parse_curl_code("sampah"), None);
+        assert!(is_accessible(Some(200)));
+        assert!(is_accessible(Some(301)));
+        assert!(!is_accessible(Some(403)));
+        assert!(!is_accessible(Some(404)));
+        assert!(!is_accessible(None));
+    }
+
+    #[test]
+    fn alias_commands_shape() {
+        let add = alias_add_command("en6", ip("10.0.0.50"), 24);
+        let del = alias_remove_command("en6", ip("10.0.0.50"), 24);
+        assert_eq!(add[0], "sudo");
+        assert!(add.iter().any(|a| a.contains("10.0.0.50")));
+        assert!(del.iter().any(|a| a.contains("10.0.0.50")));
+        assert_ne!(add, del);
     }
 
     #[test]

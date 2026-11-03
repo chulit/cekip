@@ -1,6 +1,6 @@
 [package]
 name = "cekip"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "CLI untuk mencari IP yang belum dipakai di sebuah subnet (ping sweep + ARP)"
 license = "MIT"
