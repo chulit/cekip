@@ -48,12 +48,19 @@ mengirim request ke URL dengan IP sumber = alias itu, lalu melepas
 alias-nya lagi. Hasilnya = aturan firewall/proxy jaringanmu untuk IP
 sumber tersebut.
 
+URL-nya **bebas sesuai keinginan user** — tiga cara mengisinya:
+
 ```bash
-# cari maks 5 IP kosong yang bisa buka YouTube, diuji lewat Ethernet (en6)
+# 1) tanpa --url: akan DITANYA saat perintah jalan
+#    (Enter saja = YouTube; boleh isi banyak, pisahkan koma)
 cekip free-url 192.168.1.0/24 --interface en6
 
-# URL lain / interface Wi-Fi / tanpa konfirmasi
-cekip free-url 192.168.1.0/24 --interface en0 --url https://contoh.com --yes
+# 2) satu URL custom (tanpa skema juga boleh, otomatis https://)
+cekip free-url 192.168.1.0/24 --interface en6 --url netflix.com
+
+# 3) banyak URL sekaligus — IP dinyatakan lolos bila lolos SEMUA URL
+cekip free-url 192.168.1.0/24 --interface en6 --url youtube.com --url netflix.com
+cekip free-url 192.168.1.0/24 --interface en6 --url "youtube.com,netflix.com" --yes
 ```
 
 - Butuh `sudo` (sekali di awal) karena memasang alias IP butuh hak admin.
@@ -78,7 +85,7 @@ pakai RST — bukan jaminan port itu terbuka).
 
 ```bash
 cargo build --release   # binary di target/release/cekip
-cargo test              # 13 unit test: parsing CIDR/range, exclude, ARP, keputusan status, alias & cek URL
+cargo test              # 14 unit test: parsing CIDR/range, exclude, ARP, keputusan status, alias & cek URL
 ```
 
 Tidak butuh hak root: ping memakai binary `ping` bawaan OS, ARP dibaca dari

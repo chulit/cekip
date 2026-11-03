@@ -333,6 +333,42 @@ pub struct UrlAccess {
     pub error: Option<String>,
 }
 
+/// Rapikan satu URL dari user: "youtube.com" -> "https://youtube.com".
+/// Yang sudah berskema (mengandung "://") dibiarkan apa adanya.
+pub fn normalize_url(raw: &str) -> String {
+    let s = raw.trim();
+    if s.contains("://") {
+        s.to_string()
+    } else {
+        format!("https://{s}")
+    }
+}
+
+/// Gabungkan masukan URL dari banyak sumber (--url berulang dan/atau
+/// daftar pisah-koma), normalisasi, buang duplikat, pertahankan urutan.
+pub fn collect_urls(inputs: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for input in inputs {
+        for part in input.split(',') {
+            let part = part.trim();
+            if part.is_empty() {
+                continue;
+            }
+            let url = normalize_url(part);
+            if !out.contains(&url) {
+                out.push(url);
+            }
+        }
+    }
+    out
+}
+
+/// Label pendek sebuah URL untuk tampilan: host-nya saja.
+pub fn url_host(url: &str) -> String {
+    let after_scheme = url.split("://").nth(1).unwrap_or(url);
+    after_scheme.split('/').next().unwrap_or(after_scheme).to_string()
+}
+
 /// "200" -> Some(200); "000" (curl gagal total) & sampah -> None.
 pub fn parse_curl_code(out: &str) -> Option<u16> {
     match out.trim() {
@@ -528,6 +564,24 @@ mod tests {
         assert_eq!(prefix_to_netmask(30), ip("255.255.255.252"));
         assert_eq!(prefix_to_netmask(0), ip("0.0.0.0"));
         assert_eq!(prefix_to_netmask(32), ip("255.255.255.255"));
+    }
+
+    #[test]
+    fn url_normalization_and_collection() {
+        assert_eq!(normalize_url("youtube.com"), "https://youtube.com");
+        assert_eq!(normalize_url("https://a.com/x"), "https://a.com/x");
+        assert_eq!(normalize_url(" http://b.com "), "http://b.com");
+        let inputs = vec![
+            "youtube.com, https://netflix.com".to_string(),
+            "youtube.com".to_string(),
+            "http://c.com/path".to_string(),
+        ];
+        assert_eq!(
+            collect_urls(&inputs),
+            vec!["https://youtube.com", "https://netflix.com", "http://c.com/path"]
+        );
+        assert_eq!(url_host("https://www.youtube.com/watch?v=1"), "www.youtube.com");
+        assert_eq!(url_host("http://127.0.0.1:18923/"), "127.0.0.1:18923");
     }
 
     #[test]

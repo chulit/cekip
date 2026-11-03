@@ -1,4 +1,4 @@
-use cekip::{check_url, scan, with_alias, Excludes, HostResult, Status, Target};
+use cekip::{check_url, collect_urls, scan, url_host, with_alias, Excludes, HostResult, Status, Target};
 use clap::{Parser, Subcommand, ValueEnum};
 use std::net::Ipv4Addr;
 use std::process::ExitCode;
@@ -31,17 +31,21 @@ enum Command {
         opts: Opts,
     },
     /// Cari IP kosong yang BISA mengakses URL tertentu (IP dipasang
-    /// sementara sebagai alias di interface kamu, diuji, lalu dilepas)
+    /// sementara sebagai alias di interface kamu, diuji, lalu dilepas).
+    /// URL bebas sesuai keinginan: --url bisa diulang / dipisah koma,
+    /// dan kalau tidak diisi akan ditanyakan saat perintah dijalankan.
     FreeUrl {
         /// Target: CIDR, range, atau IP tunggal
         target: String,
-        /// URL yang diuji aksesnya
-        #[arg(long, default_value = "https://www.youtube.com")]
-        url: String,
+        /// URL yang diuji, mis. --url youtube.com --url netflix.com
+        /// atau --url "youtube.com,netflix.com". Tanpa skema boleh
+        /// (otomatis https://). Kosong = ditanya interaktif.
+        #[arg(long)]
+        url: Vec<String>,
         /// Interface tempat alias dipasang, mis. en6 (Ethernet) / en0 (Wi-Fi)
         #[arg(long)]
         interface: String,
-        /// Berhenti setelah menemukan sebanyak ini IP yang lolos uji
+        /// Berhenti setelah menemukan sebanyak ini IP yang lolos SEMUA URL
         #[arg(long, default_value_t = 5)]
         count: usize,
         /// Maksimal kandidat IP kosong yang diuji satu per satu
@@ -146,9 +150,12 @@ fn run(cli: Cli) -> Result<(), String> {
     }
 }
 
+/// (IP, [(url, http_status, accessible)])
+type TestedIp = (Ipv4Addr, Vec<(String, Option<u16>, bool)>);
+
 fn free_url(
     target: &str,
-    url: &str,
+    url_inputs: &[String],
     interface: &str,
     count: usize,
     test_limit: usize,
@@ -157,6 +164,17 @@ fn free_url(
     yes: bool,
     opts: &Opts,
 ) -> Result<(), String> {
+    // URL sepenuhnya pilihan user: dari --url (berulang / koma), atau
+    // ditanyakan di terminal, atau default YouTube bila Enter saja.
+    let mut urls = collect_urls(url_inputs);
+    if urls.is_empty() {
+        let answer = prompt_line("URL yang mau diuji (boleh lebih dari satu, pisahkan koma) [Enter = https://www.youtube.com]: ");
+        urls = collect_urls(&[answer]);
+        if urls.is_empty() {
+            urls = vec!["https://www.youtube.com".to_string()];
+        }
+    }
+
     let parsed = Target::parse(target)?;
     let alias_prefix = match &parsed {
         Target::Cidr { prefix: p, .. } => prefix.unwrap_or(*p),
@@ -178,9 +196,10 @@ fn free_url(
     }
 
     println!(
-        "\nAkan menguji akses ke {url} dari maksimal {} kandidat IP kosong pertama.\n\
+        "\nAkan menguji akses ke {} dari maksimal {} kandidat IP kosong pertama.\n\
          Caranya: tiap IP dipasang SEMENTARA sebagai alias di {interface} (butuh sudo),\n\
          request dikirim dari IP itu, lalu alias langsung dilepas lagi.\n",
+        urls.join(", "),
         candidates.len()
     );
     if !yes && !confirm("Lanjut? [y/N] ") {
@@ -188,54 +207,72 @@ fn free_url(
         return Ok(());
     }
 
-    let mut passed: Vec<(Ipv4Addr, Option<u16>)> = Vec::new();
-    let mut tested: Vec<(Ipv4Addr, Option<u16>, bool)> = Vec::new();
+    let mut passed: Vec<Ipv4Addr> = Vec::new();
+    let mut tested: Vec<TestedIp> = Vec::new();
     for ip in &candidates {
         eprintln!("Menguji {ip} via {interface}...");
-        let access = with_alias(interface, *ip, alias_prefix, || {
-            check_url(&ip.to_string(), url, Duration::from_millis(url_timeout_ms))
+        let accesses = with_alias(interface, *ip, alias_prefix, || {
+            urls.iter()
+                .map(|u| check_url(&ip.to_string(), u, Duration::from_millis(url_timeout_ms)))
+                .collect::<Vec<_>>()
         })?;
-        eprintln!(
-            "  -> {} {}",
-            access.http_status.map(|c| format!("HTTP {c}")).unwrap_or_else(|| "tidak ada respons".into()),
-            if access.accessible { "(BISA diakses)" } else { "(tidak bisa)" }
-        );
-        tested.push((*ip, access.http_status, access.accessible));
-        if access.accessible {
-            passed.push((*ip, access.http_status));
+        let mut rows = Vec::new();
+        let mut all_ok = true;
+        for (u, a) in urls.iter().zip(&accesses) {
+            eprintln!(
+                "  {} -> {} {}",
+                url_host(u),
+                a.http_status.map(|c| format!("HTTP {c}")).unwrap_or_else(|| "tidak ada respons".into()),
+                if a.accessible { "(BISA)" } else { "(tidak bisa)" }
+            );
+            all_ok &= a.accessible;
+            rows.push((u.clone(), a.http_status, a.accessible));
+        }
+        tested.push((*ip, rows));
+        if all_ok {
+            passed.push(*ip);
             if passed.len() >= count {
                 break;
             }
         }
     }
 
-    println!("\n{:<16} {:<8} {}", "IP", "HTTP", "AKSES KE URL");
-    for (ip, code, ok) in &tested {
-        println!(
-            "{:<16} {:<8} {}",
-            ip.to_string(),
-            code.map(|c| c.to_string()).unwrap_or_else(|| "-".into()),
-            if *ok { "BISA" } else { "tidak" }
-        );
+    println!("\n{:<16} {:<28} {:<8} {}", "IP", "URL", "HTTP", "AKSES");
+    for (ip, rows) in &tested {
+        for (u, code, ok) in rows {
+            println!(
+                "{:<16} {:<28} {:<8} {}",
+                ip.to_string(),
+                url_host(u),
+                code.map(|c| c.to_string()).unwrap_or_else(|| "-".into()),
+                if *ok { "BISA" } else { "tidak" }
+            );
+        }
     }
     if passed.is_empty() {
-        println!("\nTidak ada kandidat yang bisa mengakses {url} dari {interface}.");
+        println!("\nTidak ada kandidat yang bisa mengakses semua URL itu dari {interface}.");
     } else {
-        println!("\n{} IP kosong bisa mengakses {url}: {}", passed.len(), passed.iter().map(|(ip, _)| ip.to_string()).collect::<Vec<_>>().join(", "));
+        println!(
+            "\n{} IP kosong lolos semua URL: {}",
+            passed.len(),
+            passed.iter().map(|ip| ip.to_string()).collect::<Vec<_>>().join(", ")
+        );
         println!("Catatan: hasil = aturan firewall/proxy jaringan untuk IP sumber tsb, diuji dari mesin ini.\nSebelum IP dipakai permanen, cek ulang sekali lagi (IP kosong bisa saja terisi device lain kapan pun).");
     }
     Ok(())
 }
 
-fn confirm(prompt: &str) -> bool {
+fn prompt_line(prompt: &str) -> String {
     use std::io::Write;
     print!("{prompt}");
     let _ = std::io::stdout().flush();
     let mut line = String::new();
-    if std::io::stdin().read_line(&mut line).is_err() {
-        return false;
-    }
-    matches!(line.trim().to_lowercase().as_str(), "y" | "ya")
+    let _ = std::io::stdin().read_line(&mut line);
+    line.trim().to_string()
+}
+
+fn confirm(prompt: &str) -> bool {
+    matches!(prompt_line(prompt).to_lowercase().as_str(), "y" | "ya")
 }
 
 fn scan_target(target: &str, opts: &Opts) -> Result<Vec<HostResult>, String> {
